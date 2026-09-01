@@ -16,20 +16,10 @@ logging.getLogger("telethon").setLevel(logging.WARNING)
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
 SESSION_STRING = os.environ["SESSION_STRING"]
-SOURCE_CHANNEL = os.environ["SOURCE_CHANNEL"]        # e.g. @patrickstarsfarm
+SOURCE_CHANNEL = os.environ["SOURCE_CHANNEL"]            # e.g. @patrickstarsfarm
 DESTINATION_CHANNEL = os.environ["DESTINATION_CHANNEL"]  # e.g. @patricktesting
 
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH, catch_up=True)
-
-
-@client.on(events.NewMessage(chats=SOURCE_CHANNEL))
-async def relay_new_post(event):
-    try:
-        await event.message.forward_to(DESTINATION_CHANNEL)
-        log.info("Relayed post (id=%s) from %s to %s",
-                 event.message.id, SOURCE_CHANNEL, DESTINATION_CHANNEL)
-    except Exception as e:
-        log.exception("Failed to relay post (id=%s): %s", event.message.id, e)
 
 
 async def main():
@@ -37,21 +27,34 @@ async def main():
     me = await client.get_me()
     log.info("Logged in as %s (id=%s)", me.username or me.first_name, me.id)
 
-    try:
-        entity = await client.get_entity(SOURCE_CHANNEL)
-        log.info("Resolved source channel '%s' -> id=%s", SOURCE_CHANNEL, entity.id)
-    except Exception as e:
-        log.error("Could NOT resolve source channel '%s': %s", SOURCE_CHANNEL, e)
+    # Resolve entities BEFORE registering the handler, so the filter
+    # uses the actual entity instead of a raw username string.
+    source_entity = await client.get_entity(SOURCE_CHANNEL)
+    dest_entity = await client.get_entity(DESTINATION_CHANNEL)
+    log.info("Resolved source channel '%s' -> id=%s", SOURCE_CHANNEL, source_entity.id)
+    log.info("Resolved destination channel '%s' -> id=%s", DESTINATION_CHANNEL, dest_entity.id)
 
-    try:
-        entity = await client.get_entity(DESTINATION_CHANNEL)
-        log.info("Resolved destination channel '%s' -> id=%s", DESTINATION_CHANNEL, entity.id)
-    except Exception as e:
-        log.error("Could NOT resolve destination channel '%s': %s", DESTINATION_CHANNEL, e)
+    @client.on(events.NewMessage(chats=source_entity))
+    async def relay_new_post(event):
+        log.info("Event received: id=%s", event.message.id)
+        for attempt in range(3):
+            try:
+                await event.message.forward_to(dest_entity)
+                log.info("Relayed post (id=%s) -> %s", event.message.id, DESTINATION_CHANNEL)
+                break
+            except Exception as e:
+                log.exception("Attempt %d failed for post id=%s: %s", attempt + 1, event.message.id, e)
+                await asyncio.sleep(2)
 
     log.info("Watching %s, relaying every new post to %s", SOURCE_CHANNEL, DESTINATION_CHANNEL)
     await client.run_until_disconnected()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    while True:
+        try:
+            asyncio.run(main())
+        except Exception as e:
+            log.exception("Bot crashed, restarting in 5s: %s", e)
+            import time
+            time.sleep(5)
